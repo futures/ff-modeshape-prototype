@@ -7,6 +7,7 @@ import static javax.ws.rs.core.MediaType.TEXT_XML;
 import static javax.ws.rs.core.Response.created;
 import static javax.ws.rs.core.Response.notAcceptable;
 import static javax.ws.rs.core.Response.ok;
+import static org.fcrepo.modeshape.FedoraObjects.getObjectSize;
 import static org.fcrepo.modeshape.jaxb.responses.DatastreamProfile.DatastreamStates.A;
 import static org.modeshape.jcr.api.JcrConstants.JCR_CONTENT;
 import static org.modeshape.jcr.api.JcrConstants.JCR_DATA;
@@ -127,14 +128,14 @@ public class FedoraDatastreams extends AbstractResource {
 		if (session.hasPermission(dspath, "add_node")) {
 			if (!session.nodeExists(dspath)) {
 				return created(
-						addDatastreamNode(dspath, contentType,
+						addDatastreamNode(pid, dspath, contentType,
 								requestBodyStream, session)).build();
 			} else {
 				if (session.hasPermission(dspath, "remove")) {
 					session.getNode(dspath).remove();
 					session.save();
 					return created(
-							addDatastreamNode(dspath, contentType,
+							addDatastreamNode(pid, dspath, contentType,
 									requestBodyStream, session)).build();
 
 				} else {
@@ -178,18 +179,19 @@ public class FedoraDatastreams extends AbstractResource {
 
 		if (session.hasPermission(dspath, "add_node")) {
 			return Response.created(
-					addDatastreamNode(dspath, contentType, requestBodyStream,
-							session)).build();
+					addDatastreamNode(pid, dspath, contentType,
+							requestBodyStream, session)).build();
 		} else {
 			session.logout();
 			return four03;
 		}
 	}
 
-	private URI addDatastreamNode(final String dsPath,
+	private URI addDatastreamNode(final String pid, final String dsPath,
 			final MediaType contentType, final InputStream requestBodyStream,
 			final Session session) throws RepositoryException, IOException {
 
+		Long oldObjectSize = getObjectSize(session.getNode("/objects/" + pid));
 		logger.debug("Attempting to add datastream node at path: " + dsPath);
 		Boolean created = false;
 		if (!session.nodeExists(dsPath)) {
@@ -237,6 +239,18 @@ public class FedoraDatastreams extends AbstractResource {
         ds.setProperty("dc:identifier", new String[] { ds.getIdentifier() });
 
 		session.save();
+		if (created) {
+			/*
+			 * we save before updating the repo size because the act of
+			 * persisting session state creates new system-curated nodes and
+			 * properties which contribute to the footprint of this resource
+			 */
+			updateRepositorySize(
+					getObjectSize(session.getNode("/objects/" + pid))
+							- oldObjectSize, session);
+			// now we save again to persist the repo size
+			session.save();
+		}
 		session.logout();
 		logger.debug("Finished adding datastream node at path: " + dsPath);
 		return uriInfo.getAbsolutePath();
@@ -389,7 +403,16 @@ public class FedoraDatastreams extends AbstractResource {
 	@Path("/{dsid}")
 	public Response deleteDatastream(@PathParam("pid") String pid,
 			@PathParam("dsid") String dsid) throws RepositoryException {
-		return deleteResource("/objects/" + pid + "/" + dsid);
+		final String dsPath = "/objects/" + pid + "/" + dsid;
+		final Session session = repo.login();
+		final Node ds;
+		if (session.nodeExists(dsPath)) {
+			ds = session.getNode(dsPath);
+		} else {
+			return four04;
+		}
+		updateRepositorySize(0L - getDatastreamSize(ds), session);
+		return deleteResource(ds);
 	}
 
 	private DatastreamProfile getDSProfile(Node ds) throws RepositoryException,
@@ -400,6 +423,9 @@ public class FedoraDatastreams extends AbstractResource {
 		dsProfile.dsLabel = ds.getName();
 		dsProfile.dsState = A;
 		dsProfile.dsMIME = getDSMimeType(ds);
+		dsProfile.dsSize = getNodePropertySize(ds)
+				+ ds.getNode(JCR_CONTENT).getProperty(JCR_DATA).getBinary()
+						.getSize();
 		dsProfile.dsCreateDate = ds.getProperty("jcr:created").getString();
 		return dsProfile;
 	}
@@ -410,4 +436,16 @@ public class FedoraDatastreams extends AbstractResource {
 				.getBinary();
 		return b.getMimeType();
 	}
+
+	public static Long getDatastreamSize(Node ds) throws ValueFormatException,
+			PathNotFoundException, RepositoryException {
+		return getNodePropertySize(ds) + getContentSize(ds);
+	}
+
+	public static Long getContentSize(Node ds) throws ValueFormatException,
+			PathNotFoundException, RepositoryException {
+		return ds.getNode(JCR_CONTENT).getProperty(JCR_DATA).getBinary()
+				.getSize();
+	}
+
 }

@@ -1,14 +1,20 @@
 package org.fcrepo.modeshape;
 
+import static com.google.common.collect.ImmutableSet.copyOf;
 import static javax.ws.rs.core.Response.noContent;
 
 import javax.annotation.PostConstruct;
 import javax.inject.Inject;
 import javax.jcr.LoginException;
 import javax.jcr.NoSuchWorkspaceException;
+import javax.jcr.Node;
+import javax.jcr.PathNotFoundException;
+import javax.jcr.Property;
+import javax.jcr.PropertyIterator;
 import javax.jcr.RepositoryException;
 import javax.jcr.Session;
-import javax.jcr.Workspace;
+import javax.jcr.Value;
+import javax.jcr.ValueFormatException;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.UriInfo;
@@ -57,8 +63,6 @@ public abstract class AbstractResource extends Constants {
 	@Inject
 	protected PidMinter pidMinter;
 
-	static protected Workspace ws;
-
 	/**
 	 * A convenience object provided by ModeShape for acting against the JCR
 	 * repository.
@@ -69,32 +73,77 @@ public abstract class AbstractResource extends Constants {
 	public void initialize() throws LoginException, NoSuchWorkspaceException,
 			RepositoryException {
 
-		ws = repo.login("fedora").getWorkspace();
-		ws.getNamespaceRegistry().registerNamespace("test", "info:fedora/test");
+		final Session session = repo.login();
+		session.getWorkspace().getNamespaceRegistry()
+				.registerNamespace("test", "info:fedora/test");
+		Node objects = jcrTools.findOrCreateNode(session, "/objects");
+		objects.setProperty("size", 0L);
+		session.save();
+		session.logout();
 	}
 
-	protected synchronized Response deleteResource(final String path)
+	protected synchronized Response deleteResource(final Node resource)
 			throws RepositoryException {
 
-		logger.debug("Attempting to delete resource at path: " + path);
-		final Session session = repo.login();
-
-		if (session.nodeExists(path)) {
-
-			if (session.hasPermission(path, "remove")) {
-				// ws.getLockManager().lock(path, true, true, Long.MAX_VALUE,
-				// "");
-				session.getNode(path).remove();
-				session.save();
-				session.logout();
-				logger.debug("Finished deleting resource at path: " + path);
-				return noContent().build();
-			} else {
-				return four03;
-			}
+		logger.debug("Attempting to delete resource at path: "
+				+ resource.getPath());
+		final Session session = resource.getSession();
+		if (session.hasPermission(resource.getPath(), "remove")) {
+			resource.remove();
+			session.save();
+			session.logout();
+			return noContent().build();
 		} else {
-			return four04;
+			return four03;
 		}
 	}
 
+	public static Long getNodePropertySize(Node node)
+			throws RepositoryException {
+		Long size = 0L;
+		PropertyIterator i = node.getProperties();
+		while (i.hasNext()) {
+			Property p = i.nextProperty();
+			if (p.isMultiple()) {
+				for (Value v : copyOf(p.getValues())) {
+					size = size + v.getBinary().getSize();
+				}
+			} else {
+				size = size + p.getBinary().getSize();
+			}
+		}
+		return size;
+	}
+
+	/**
+	 * Alter the total repository size.
+	 * 
+	 * @param change
+	 *            the amount by which to [de|in]crement the total repository
+	 *            size
+	 * @param session
+	 *            the javax.jcr.Session in which the originating mutation is
+	 *            occurring
+	 * @throws PathNotFoundException
+	 * @throws RepositoryException
+	 */
+	protected void updateRepositorySize(Long change, Session session)
+			throws PathNotFoundException, RepositoryException {
+		logger.debug("updateRepositorySize called with change quantity: "
+				+ change);
+		Property sizeProperty = session.getNode("/objects").getProperty("size");
+		Long previousSize = sizeProperty.getLong();
+		logger.debug("Previous repository size: " + previousSize);
+		synchronized (sizeProperty) {
+			sizeProperty.setValue(previousSize + change);
+			session.save();
+		}
+		logger.debug("Current repository size: " + sizeProperty.getLong());
+	}
+
+	protected Long getRepositorySize(Session session)
+			throws ValueFormatException, PathNotFoundException,
+			RepositoryException {
+		return session.getNode("/objects").getProperty("size").getLong();
+	}
 }

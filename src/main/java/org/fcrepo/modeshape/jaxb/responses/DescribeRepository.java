@@ -11,4 +11,10 @@ public class DescribeRepository {
 	@XmlElement
 	protected String repositoryVersion = FEDORA_VERSION;
 
+	@XmlElement
+	public Long numberOfObjects;
+
+	@XmlElement
+	public Long repositorySize;
+
 }

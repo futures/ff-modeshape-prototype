@@ -6,6 +6,7 @@ import static javax.ws.rs.core.MediaType.APPLICATION_JSON;
 import static javax.ws.rs.core.MediaType.TEXT_XML;
 import static javax.ws.rs.core.Response.created;
 import static javax.ws.rs.core.Response.ok;
+import static org.fcrepo.modeshape.FedoraDatastreams.getContentSize;
 import static org.fcrepo.modeshape.jaxb.responses.ObjectProfile.ObjectStates.A;
 
 import java.io.IOException;
@@ -73,6 +74,14 @@ public class FedoraObjects extends AbstractResource {
 			obj.setProperty("jcr:lastModified", Calendar.getInstance());
             obj.setProperty("dc:identifier", new String[] { obj.getIdentifier(), pid });
 			session.save();
+			/*
+			 * we save before updating the repo size because the act of
+			 * persisting session state creates new system-curated nodes and
+			 * properties which contribute to the footprint of this resource
+			 */
+			updateRepositorySize(getObjectSize(obj), session);
+			// now we save again to persist the repo size
+			session.save();
 			session.logout();
 			logger.debug("Finished ingest with pid: " + pid);
 			return created(uriInfo.getAbsolutePath()).build();
@@ -103,6 +112,7 @@ public class FedoraObjects extends AbstractResource {
 					.getString();
 			objectProfile.objLastModDate = obj.getProperty("jcr:lastModified")
 					.getString();
+			objectProfile.objSize = getObjectSize(obj);
 			objectProfile.objItemIndexViewURL = uriInfo
 					.getAbsolutePathBuilder().path("datastreams").build();
 			objectProfile.objState = A;
@@ -127,22 +137,35 @@ public class FedoraObjects extends AbstractResource {
 	@Path("/{pid}")
 	public Response deleteObject(@PathParam("pid") final String pid)
 			throws RepositoryException {
-		return deleteResource("/objects/" + pid);
+		final Session session = repo.login();
+		final Node obj = session.getNode("/objects/" + pid);
+		updateRepositorySize(0L - getObjectSize(obj), session);
+		return deleteResource(obj);
 	}
 
 	/**
-	 * Provides the number of objects in the repository
-	 * 
-	 * @return the number of objects found
+	 * @param obj
+	 * @return object size in bytes
 	 * @throws RepositoryException
 	 */
-	@GET
-	@Path("/numObjects")
-	public Long getNumObjects() throws RepositoryException {
-		final Session session = repo.login();
-		Long numObjects = session.getNode("/objects").getNodes().getSize();
-		session.logout();
-		return numObjects;
+	static Long getObjectSize(Node obj) throws RepositoryException {
+		return getNodePropertySize(obj) + getObjectDSSize(obj);
+	}
+
+	/**
+	 * @param obj
+	 * @return object's datastreams' total size in bytes
+	 * @throws RepositoryException
+	 */
+	private static Long getObjectDSSize(Node obj) throws RepositoryException {
+		Long size = 0L;
+		NodeIterator i = obj.getNodes();
+		while (i.hasNext()) {
+			Node ds = i.nextNode();
+			size = size + getNodePropertySize(ds);
+			size = size + getContentSize(ds);
+		}
+		return size;
 	}
 
 }
